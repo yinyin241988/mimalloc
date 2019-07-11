@@ -96,6 +96,31 @@ void        _mi_free_delayed_block(mi_block_t* block);
 bool        _mi_page_is_valid(mi_page_t* page);
 #endif
 
+// "trace.c"
+#ifdef MI_TRACE
+void _mi_trace_free(mi_heap_t* heap, const void* p);
+void _mi_trace_malloc(mi_heap_t* heap, const void* p, size_t size);
+void _mi_trace_realloc(mi_heap_t* heap, const void* p, const void* pin, size_t newsize);
+void _mi_trace_malloc_aligned(mi_heap_t* heap, const void* p, size_t size, size_t align, size_t offset);
+void _mi_trace_realloc_aligned(mi_heap_t* heap, const void* p, const void* pin, size_t size, size_t align, size_t offset);
+
+void _mi_trace_process_init();
+void _mi_trace_process_done();
+void _mi_trace_thread_init(mi_tld_t* tld);
+void _mi_trace_thread_done(mi_tld_t* tld);
+#else
+#define _mi_trace_free(h,p)  
+#define _mi_trace_malloc(h,p,sz)
+#define _mi_trace_realloc(h,p,q,sz)
+#define _mi_trace_malloc_aligned(h,p,sz,a,o)
+#define _mi_trace_realloc_aligned(h,p,q,sz,a,o)
+
+#define _mi_trace_process_init()
+#define _mi_trace_process_done()
+#define _mi_trace_thread_init(tld)
+#define _mi_trace_thread_done(tld)
+#endif
+
 
 // ------------------------------------------------------
 // Branches

@@ -93,7 +93,7 @@
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>../../include</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>MI_DEBUG=3;_MBCS;%(PreprocessorDefinitions);</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MI_TRACE=1;MI_DEBUG=3;_MBCS;%(PreprocessorDefinitions);</PreprocessorDefinitions>
       <CompileAs>Default</CompileAs>
     </ClCompile>
     <Lib>
@@ -110,7 +110,7 @@
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>../../include</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>MI_DEBUG=3;_MBCS;%(PreprocessorDefinitions);</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MI_TRACE=1;MI_DEBUG=3;_MBCS;%(PreprocessorDefinitions);</PreprocessorDefinitions>
       <CompileAs>Default</CompileAs>
     </ClCompile>
     <PostBuildEvent>
@@ -236,6 +236,7 @@
     <ClCompile Include="..\..\src\segment.c" />
     <ClCompile Include="..\..\src\os.c" />
     <ClCompile Include="..\..\src\stats.c" />
+    <ClCompile Include="..\..\src\trace.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="$(ProjectDir)..\..\include\mimalloc-internal.h" />

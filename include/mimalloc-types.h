@@ -389,6 +389,7 @@ typedef struct mi_os_tld_s {
   mi_stats_t*         stats;               // points to tld stats
 } mi_os_tld_t;
 
+
 // Thread local data
 struct mi_tld_s {
   unsigned long long  heartbeat;     // monotonic heartbeat count
@@ -396,6 +397,7 @@ struct mi_tld_s {
   mi_segments_tld_t   segments;      // segment tld
   mi_os_tld_t         os;            // os tld
   mi_stats_t          stats;         // statistics
+  void*               trace;         // trace data (if compiled with MI_TRACE defined)
 };
 
 #endif
