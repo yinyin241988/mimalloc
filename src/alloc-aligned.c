@@ -34,6 +34,7 @@ static void* mi_heap_malloc_zero_aligned_at(mi_heap_t* heap, size_t size, size_t
       mi_assert_internal(p != NULL);
       mi_assert_internal(((uintptr_t)p + offset) % alignment == 0);
       if (zero) memset(p,0,size);
+      _mi_trace_malloc_aligned(heap,p,size,alignment,offset);
       return p;
     }
   }
@@ -49,6 +50,7 @@ static void* mi_heap_malloc_zero_aligned_at(mi_heap_t* heap, size_t size, size_t
   void* aligned_p = (adjust == alignment ? p : (void*)((uintptr_t)p + adjust));
   mi_assert_internal(((uintptr_t)aligned_p + offset) % alignment == 0);
   mi_assert_internal( p == _mi_page_ptr_unalign(_mi_ptr_segment(aligned_p),_mi_ptr_page(aligned_p),aligned_p) );
+  _mi_trace_malloc_aligned(heap, aligned_p, size, alignment, offset);
   return aligned_p;
 }
 
@@ -111,6 +113,7 @@ static void* mi_heap_realloc_zero_aligned_at(mi_heap_t* heap, void* p, size_t ne
   size_t size = mi_usable_size(p);
   if (newsize <= size && newsize >= (size - (size / 2))
       && (((uintptr_t)p + offset) % alignment) == 0) {
+    _mi_trace_realloc_aligned(heap, p, p, size, alignment, offset);
     return p;  // reallocation still fits, is aligned and not more than 50% waste
   }
   else {
@@ -124,6 +127,7 @@ static void* mi_heap_realloc_zero_aligned_at(mi_heap_t* heap, void* p, size_t ne
       memcpy(newp, p, (newsize > size ? size : newsize));
       mi_free(p); // only free if successful
     }
+    _mi_trace_realloc_aligned(heap, newp, p, size, alignment, offset);
     return newp;
   }
 }

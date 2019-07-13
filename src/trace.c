@@ -43,8 +43,8 @@ typedef enum mi_trace_kind_e {
 } mi_trace_kind_t;
 
 #define MI_CHUNK_HEADER_SIZE    (32)
-#define MI_CHUNK_FULL_SIZE      (64*1024)
-#define MI_CHUNK_MAX_DATASIZE   (MI_CHUNK_FULL_SIZE - MI_CHUNK_HEADER_SIZE)  // 64KiB per chunk
+#define MI_CHUNK_FULL_SIZE      (8*1024)  // 8KiB per chunk
+#define MI_CHUNK_MAX_DATASIZE   (MI_CHUNK_FULL_SIZE - MI_CHUNK_HEADER_SIZE)  
 
 typedef struct mi_trace_chunk_s {
   uint64_t datasize;
@@ -105,6 +105,7 @@ static void mi_event_emit(mi_trace_chunk_t* chunk, const mi_event_t* ev, size_t 
 }
 
 static void mi_trace(mi_trace_chunk_t* chunk, mi_event_kind_t ekind, const void* p, size_t size, const void* pin, size_t align, size_t offset) {
+  size = ((size + MI_INTPTR_SIZE - 1) / MI_INTPTR_SIZE) * MI_INTPTR_SIZE; // round-up to word size
   size_t size_lo = (size >> MI_INTPTR_SHIFT) & 0xFFFF;
   size_t size_hi = (size >> (16 + MI_INTPTR_SHIFT));
   if (ekind == mi_ev_malloc && size_hi == 0) ekind = mi_ev_malloc_small;
@@ -171,20 +172,24 @@ void _mi_trace_process_init() {
   if (ftrace==NULL) _mi_warning_message("unable to open trace file for writing: %s\n", fname);
   const char* header = "mimalloctrace64"; // 16 bytes with 0
   fwrite(header,1,strlen(header)+1,ftrace);
+  _mi_trace_thread_init();
 }
 
 void _mi_trace_process_done() {
+  _mi_trace_thread_done();
   if (ftrace==NULL) return;
   fflush(ftrace);
   fclose(ftrace);
 }
 
-void _mi_trace_thread_init(mi_tld_t* tld) {
+void _mi_trace_thread_init() {
+  static volatile uintptr_t trace_tid = 0;
+  mi_tld_t* tld = mi_get_default_heap()->tld;
   tld->trace = NULL;
   if (ftrace==NULL) return;
   mi_trace_chunk_t* chunk = _mi_os_alloc(MI_CHUNK_FULL_SIZE, &tld->stats);
   chunk->datasize = 0;
-  chunk->thread_id = _mi_thread_id();
+  chunk->thread_id = mi_atomic_increment(&trace_tid);
   chunk->timestamp = mi_trace_timestamp();
   chunk->adler = 0;
   chunk->kind = 0;
@@ -192,7 +197,8 @@ void _mi_trace_thread_init(mi_tld_t* tld) {
   mi_trace(chunk, mi_ev_free, NULL, 1, NULL, 0, 0); // start-of-thread
 }
 
-void _mi_trace_thread_done(mi_tld_t* tld) {
+void _mi_trace_thread_done() {
+  mi_tld_t* tld = mi_get_default_heap()->tld;
   mi_trace_chunk_t* chunk = mi_trace_chunk(tld);
   if (chunk==NULL) return;
   mi_trace(chunk, mi_ev_free, NULL, 2, NULL, 0, 0); // end-of-thread

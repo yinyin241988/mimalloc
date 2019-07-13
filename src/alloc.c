@@ -24,7 +24,7 @@ extern inline void* _mi_page_malloc(mi_heap_t* heap, mi_page_t* page, size_t siz
   mi_assert_internal(page->block_size==0||page->block_size >= size);
   mi_block_t* block = page->free;
   if (mi_unlikely(block == NULL)) {
-    return _mi_malloc_generic(heap, size); // slow path
+    return _mi_malloc_generic(heap, size); // slow path    
   }
   mi_assert_internal(block != NULL && _mi_ptr_page(block) == page);
   // pop from the free list
@@ -39,6 +39,7 @@ extern inline void* _mi_page_malloc(mi_heap_t* heap, mi_page_t* page, size_t siz
 #if (MI_STAT>1)
   if(size <= MI_LARGE_SIZE_MAX) mi_heap_stat_increase(heap,normal[_mi_bin(size)], 1);
 #endif
+  _mi_trace_malloc(heap, block, size);
   return block;
 }
 
@@ -216,6 +217,7 @@ void mi_free(void* p) mi_attr_noexcept
     return;
   }
 #endif
+  _mi_trace_free(mi_heap_get_default(), p);
 
   mi_page_t* page = _mi_segment_page_of(segment, p);
 
@@ -351,6 +353,7 @@ void* _mi_heap_realloc_zero(mi_heap_t* heap, void* p, size_t newsize, bool zero)
   if (p == NULL) return _mi_heap_malloc_zero(heap,newsize,zero);
   size_t size = mi_usable_size(p);
   if (newsize <= size && newsize >= (size / 2)) {
+    _mi_trace_realloc(heap,p,p,newsize);
     return p;  // reallocation still fits and not more than 50% waste
   }
   void* newp = mi_heap_malloc(heap,newsize); 
@@ -363,6 +366,7 @@ void* _mi_heap_realloc_zero(mi_heap_t* heap, void* p, size_t newsize, bool zero)
     memcpy(newp, p, (newsize > size ? size : newsize));
     mi_free(p); // only free if successful
   }
+  _mi_trace_realloc(heap, newp, p, newsize);
   return newp;
 }
 

@@ -106,8 +106,8 @@ void _mi_trace_realloc_aligned(mi_heap_t* heap, const void* p, const void* pin, 
 
 void _mi_trace_process_init();
 void _mi_trace_process_done();
-void _mi_trace_thread_init(mi_tld_t* tld);
-void _mi_trace_thread_done(mi_tld_t* tld);
+void _mi_trace_thread_init();
+void _mi_trace_thread_done();
 #else
 #define _mi_trace_free(h,p)  
 #define _mi_trace_malloc(h,p,sz)
@@ -117,8 +117,8 @@ void _mi_trace_thread_done(mi_tld_t* tld);
 
 #define _mi_trace_process_init()
 #define _mi_trace_process_done()
-#define _mi_trace_thread_init(tld)
-#define _mi_trace_thread_done(tld)
+#define _mi_trace_thread_init()
+#define _mi_trace_thread_done()
 #endif
 
 

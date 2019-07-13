@@ -336,6 +336,7 @@ void mi_thread_init(void) mi_attr_noexcept
     pthread_setspecific(mi_pthread_key, (void*)(_mi_thread_id()|1)); // set to a dummy value so that `mi_pthread_done` is called
   #endif
 
+  _mi_trace_thread_init();
   #if (MI_DEBUG>0) // not in release mode as that leads to crashes on Windows dynamic override
   _mi_verbose_message("thread init: 0x%zx\n", _mi_thread_id());
   #endif
@@ -347,6 +348,8 @@ void mi_thread_done(void) mi_attr_noexcept {
   if (!_mi_is_main_thread() && mi_heap_is_initialized(heap))  {
     _mi_stat_decrease(&heap->tld->stats.threads, 1);
   }
+
+  _mi_trace_thread_done();
 
   // abandon the thread local heap
   if (_mi_heap_done()) return; // returns true if already ran
@@ -387,6 +390,7 @@ void mi_process_init(void) mi_attr_noexcept {
   mi_process_setup_auto_thread_done();
   mi_stats_reset();
   _mi_os_init();
+  _mi_trace_process_init();
 }
 
 static void mi_process_done(void) {
@@ -404,6 +408,7 @@ static void mi_process_done(void) {
       mi_option_is_enabled(mi_option_verbose)) {
     mi_stats_print(NULL);
   }
+  _mi_trace_process_done();
   _mi_verbose_message("process done: 0x%zx\n", _mi_heap_main.thread_id);
 }
 
