@@ -99,10 +99,12 @@ bool        _mi_page_is_valid(mi_page_t* page);
 // "trace.c"
 #ifdef MI_TRACE
 void _mi_trace_free(mi_heap_t* heap, const void* p);
+void _mi_trace_free_mt(mi_heap_t* heap, const void* p, uintptr_t thread_id);
 void _mi_trace_malloc(mi_heap_t* heap, const void* p, size_t size);
 void _mi_trace_realloc(mi_heap_t* heap, const void* p, const void* pin, size_t newsize);
 void _mi_trace_malloc_aligned(mi_heap_t* heap, const void* p, size_t size, size_t align, size_t offset);
 void _mi_trace_realloc_aligned(mi_heap_t* heap, const void* p, const void* pin, size_t size, size_t align, size_t offset);
+void _mi_trace_barrier();
 
 void _mi_trace_process_init();
 void _mi_trace_process_done();
@@ -110,10 +112,12 @@ void _mi_trace_thread_init();
 void _mi_trace_thread_done();
 #else
 #define _mi_trace_free(h,p)  
+#define _mi_trace_free_mt(h,p,tid)
 #define _mi_trace_malloc(h,p,sz)
 #define _mi_trace_realloc(h,p,q,sz)
 #define _mi_trace_malloc_aligned(h,p,sz,a,o)
 #define _mi_trace_realloc_aligned(h,p,q,sz,a,o)
+#define _mi_trace_barrier()
 
 #define _mi_trace_process_init()
 #define _mi_trace_process_done()

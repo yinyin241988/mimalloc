@@ -213,6 +213,7 @@ void _mi_page_reclaim(mi_heap_t* heap, mi_page_t* page) {
 // allocate a fresh page from a segment
 static mi_page_t* mi_page_fresh_alloc(mi_heap_t* heap, mi_page_queue_t* pq, size_t block_size) {
   mi_assert_internal(mi_heap_contains_queue(heap, pq));
+
   mi_page_t* page = _mi_segment_page_alloc(block_size, &heap->tld->segments, &heap->tld->os);
   if (page == NULL) return NULL;
   mi_page_init(heap, page, block_size, &heap->tld->stats);

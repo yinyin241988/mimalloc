@@ -335,8 +335,8 @@ void _mi_segment_thread_collect(mi_segments_tld_t* tld) {
 // Allocate a segment from the OS aligned to `MI_SEGMENT_SIZE` .
 static mi_segment_t* mi_segment_alloc( size_t required, mi_page_kind_t page_kind, size_t page_shift, mi_segments_tld_t* tld, mi_os_tld_t* os_tld)
 {
+  _mi_trace_barrier();
   // calculate needed sizes first
-
   size_t capacity;
   if (page_kind == MI_PAGE_HUGE) {
     mi_assert_internal(page_shift==MI_SEGMENT_SHIFT && required > 0);
@@ -421,6 +421,7 @@ static size_t mi_page_size(const mi_page_t* page) {
 
 static void mi_segment_free(mi_segment_t* segment, bool force, mi_segments_tld_t* tld) {
   //fprintf(stderr,"mimalloc: free segment at %p\n", (void*)segment);
+  _mi_trace_barrier();
   mi_assert(segment != NULL);
   mi_segment_remove_from_free_queue(segment,tld);
   

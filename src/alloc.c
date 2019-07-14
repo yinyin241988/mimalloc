@@ -20,6 +20,7 @@ terms of the MIT license. A copy of the license can be found in the file
 
 // Fast allocation in a page: just pop from the free list.
 // Fall back to generic allocation only if the list is empty.
+// All allocation eventually comes through this routine as `_mi_malloc_generic` calls it too.
 extern inline void* _mi_page_malloc(mi_heap_t* heap, mi_page_t* page, size_t size) mi_attr_noexcept {
   mi_assert_internal(page->block_size==0||page->block_size >= size);
   mi_block_t* block = page->free;
@@ -217,7 +218,10 @@ void mi_free(void* p) mi_attr_noexcept
     return;
   }
 #endif
-  _mi_trace_free(mi_heap_get_default(), p);
+#ifdef MI_TRACE
+  if (mi_likely(local)) _mi_trace_free(mi_heap_get_default(), p);
+                   else _mi_trace_free_mt(mi_heap_get_default(), p, segment->thread_id);
+#endif
 
   mi_page_t* page = _mi_segment_page_of(segment, p);
 

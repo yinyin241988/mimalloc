@@ -19,19 +19,26 @@ typedef enum mi_event_kind_e {
   mi_ev_none = 0,
   mi_ev_free,
   mi_ev_malloc_small,
+  mi_ev_free_mt,
   mi_ev_malloc,
   mi_ev_realloc,
   mi_ev_malloc_aligned,
   mi_ev_realloc_aligned
 } mi_event_kind_t;
 
+typedef enum mi_barrier_e {
+  mi_barrier_generic = 1,
+  mi_barrier_thread_new,
+  mi_barrier_thread_done
+} mi_barrier_t;
+
 typedef struct mi_event_s {
   uintptr_t kind:3;
-  uintptr_t ptr:45;
-  uintptr_t size_lo:16;
-  // only for realloc and large sizes
+  uintptr_t ptr:45;     
+  uintptr_t size_lo:16; // size is the logical time for free_mt
+  // only for realloc, malloc large sizes, or multi-threaded free
   uintptr_t padding:3;
-  uintptr_t ptr_in:45;
+  uintptr_t ptr_in:45;  // ptr_in is the thread id for free_mt 
   uintptr_t size_hi:16;
   // only for aligned malloc/realloc
   uintptr_t align:32;
@@ -62,7 +69,7 @@ static uintptr_t mi_trace_timestamp() {
 }
 
 static mi_trace_chunk_t* mi_trace_chunk(const mi_tld_t* tld) {
-  return (mi_trace_chunk_t*)tld->trace;
+  return (tld==NULL ? NULL : (mi_trace_chunk_t*)tld->trace); // tld can be NULL during cleanup in heap_done.
 }
 
 static mi_trace_chunk_t* mi_heap_chunk(const mi_heap_t* heap) {
@@ -105,9 +112,12 @@ static void mi_event_emit(mi_trace_chunk_t* chunk, const mi_event_t* ev, size_t 
 }
 
 static void mi_trace(mi_trace_chunk_t* chunk, mi_event_kind_t ekind, const void* p, size_t size, const void* pin, size_t align, size_t offset) {
-  size = ((size + MI_INTPTR_SIZE - 1) / MI_INTPTR_SIZE) * MI_INTPTR_SIZE; // round-up to word size
-  size_t size_lo = (size >> MI_INTPTR_SHIFT) & 0xFFFF;
-  size_t size_hi = (size >> (16 + MI_INTPTR_SHIFT));
+  mi_assert_internal( ((uintptr_t)p % MI_INTPTR_SIZE) == 0 ); // pointer must be aligned
+  if (chunk==NULL) return; 
+  if (size > UINT32_MAX) size = UINT32_MAX;  // trace at most 4Gb sizes for now.
+
+  size_t size_lo = size & 0xFFFF;
+  size_t size_hi = (size >> 16);
   if (ekind == mi_ev_malloc && size_hi == 0) ekind = mi_ev_malloc_small;
 
   // make compressed event record
@@ -159,6 +169,23 @@ void _mi_trace_realloc_aligned(mi_heap_t* heap, const void* p, const void* pin, 
 }
 
 
+// Multi-threaded free increments the logical clock; use special pointers for 
+// thread new, done, and the slow path (to replay more in sync).
+void _mi_trace_free_mt(mi_heap_t* heap, const void* p, uintptr_t thread_id) {
+  static volatile uintptr_t lclock = 0;
+  uintptr_t ltime = mi_atomic_increment(&lclock);
+  mi_trace(mi_heap_chunk(heap), mi_ev_free_mt, p, ltime - 1, (const void*)thread_id, 0, 0);
+}
+
+static void mi_trace_barrierx(mi_heap_t* heap, mi_barrier_t barrier ) {
+  _mi_trace_free_mt(heap, (void*)((uintptr_t)barrier<<MI_INTPTR_SHIFT), _mi_thread_id());
+}
+
+void _mi_trace_barrier() { 
+  mi_trace_barrierx(mi_get_default_heap(),mi_barrier_generic);
+}
+
+
 // --------------------------------------------------------
 // Initialization
 // --------------------------------------------------------
@@ -183,25 +210,31 @@ void _mi_trace_process_done() {
 }
 
 void _mi_trace_thread_init() {
-  static volatile uintptr_t trace_tid = 0;
-  mi_tld_t* tld = mi_get_default_heap()->tld;
+  mi_heap_t* heap = mi_get_default_heap();
+  mi_tld_t* tld = heap->tld;
   tld->trace = NULL;
   if (ftrace==NULL) return;
   mi_trace_chunk_t* chunk = _mi_os_alloc(MI_CHUNK_FULL_SIZE, &tld->stats);
   chunk->datasize = 0;
-  chunk->thread_id = mi_atomic_increment(&trace_tid);
+  chunk->thread_id = _mi_thread_id();
   chunk->timestamp = mi_trace_timestamp();
   chunk->adler = 0;
   chunk->kind = 0;
   tld->trace = chunk;
-  mi_trace(chunk, mi_ev_free, NULL, 1, NULL, 0, 0); // start-of-thread
+  // encode thread new as a free_mt on a special pointer value
+  mi_trace_barrierx(heap,mi_barrier_thread_new);
 }
 
 void _mi_trace_thread_done() {
-  mi_tld_t* tld = mi_get_default_heap()->tld;
+  mi_heap_t* heap = mi_get_default_heap();
+  mi_tld_t* tld = heap->tld;
   mi_trace_chunk_t* chunk = mi_trace_chunk(tld);
   if (chunk==NULL) return;
-  mi_trace(chunk, mi_ev_free, NULL, 2, NULL, 0, 0); // end-of-thread
+  
+  // encode thread done as a free_mt on a special pointer value
+  mi_trace_barrierx(heap,mi_barrier_thread_done);
+
+  // and free the chunk
   mi_trace_write(chunk);
   _mi_os_free(chunk, MI_CHUNK_FULL_SIZE, &tld->stats);
   tld->trace = NULL;
