@@ -38,7 +38,10 @@ extern inline void* _mi_page_malloc(mi_heap_t* heap, mi_page_t* page, size_t siz
   block->next = 0;
 #endif
 #if (MI_STAT>1)
-  if(size <= MI_LARGE_SIZE_MAX) mi_heap_stat_increase(heap,normal[_mi_bin(size)], 1);
+  if(size <= MI_LARGE_SIZE_MAX) {
+    size_t bin = _mi_bin(size);
+    mi_heap_stat_increase(heap,normal[bin], 1);
+  }
 #endif
   _mi_trace_malloc(heap, block, size);
   return block;
@@ -446,6 +449,7 @@ char* mi_strndup(const char* s, size_t n) mi_attr_noexcept {
   return mi_heap_strndup(mi_get_default_heap(),s,n);
 }
 
+#ifndef __wasi__
 // `realpath` using mi_malloc
 #ifdef _WIN32
 #ifndef PATH_MAX
@@ -502,6 +506,7 @@ char* mi_heap_realpath(mi_heap_t* heap, const char* fname, char* resolved_name) 
 char* mi_realpath(const char* fname, char* resolved_name) mi_attr_noexcept {
   return mi_heap_realpath(mi_get_default_heap(),fname,resolved_name);
 }
+#endif
 
 /*-------------------------------------------------------
 C++ new and new_aligned
