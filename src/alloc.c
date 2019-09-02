@@ -96,13 +96,7 @@ void _mi_block_zero_init(void* p, size_t size) {
     mi_page_t* page = _mi_ptr_page(p);
     if (page->flags.is_zero) {
       ((mi_block_t*)p)->next = 0;
-      #if MI_DEBUG>0
-      for (size_t i = 0; i < (page->block_size/sizeof(uintptr_t)); i++) { 
-        if (((uintptr_t*)p)[i] != 0) {
-          _mi_assert_fail("page not zero", __FILE__, __LINE__, "_mi_block_zero_init");
-        }
-      }
-      #endif
+      mi_assert_expensive(mi_mem_is_zero(p,size));
       return; // and done
     }
   }
@@ -185,7 +179,7 @@ static mi_decl_noinline void _mi_free_block_mt(mi_page_t* page, mi_block_t* bloc
       mi_block_t* dfree;
       do {
         dfree = (mi_block_t*)heap->thread_delayed_free;
-        mi_block_set_nextx(heap->cookie,block,dfree);
+        mi_block_set_next_secure(heap->cookie,block,dfree);
       } while (!mi_atomic_cas_ptr_weak(mi_atomic_cast(void*,&heap->thread_delayed_free), block, dfree));
     }
 

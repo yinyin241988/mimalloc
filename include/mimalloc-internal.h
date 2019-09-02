@@ -344,40 +344,41 @@ static inline void mi_page_set_has_aligned(mi_page_t* page, bool has_aligned) {
 // Encoding/Decoding the free list next pointers
 // -------------------------------------------------------------------
 
-static inline mi_block_t* mi_block_nextx( uintptr_t cookie, mi_block_t* block ) {
-  #if MI_SECURE
+static inline mi_block_t* mi_block_next_secure( const uintptr_t cookie, const mi_block_t* const block ) {
   return (mi_block_t*)(block->next ^ cookie);
+}
+
+static inline void mi_block_set_next_secure(const uintptr_t cookie, mi_block_t* const block, const mi_block_t* const next) {
+  block->next = (mi_encoded_t)next ^ cookie;
+}
+
+static inline mi_block_t* mi_block_next(const mi_page_t* page, const mi_block_t* block) {
+  #if MI_SECURE
+  return mi_block_next_secure(page->cookie,block);
+  #elif MI_RELATIVE_FREE
+  return (mi_block_t*)((uintptr_t)block + block->next + page->block_size);
   #else
-  UNUSED(cookie);
+  UNUSED(page);
   return (mi_block_t*)block->next;
   #endif
 }
 
-static inline void mi_block_set_nextx(uintptr_t cookie, mi_block_t* block, mi_block_t* next) {
+static inline void mi_block_set_next(const mi_page_t* page, mi_block_t* const block, const mi_block_t* next) {
   #if MI_SECURE
-  block->next = (mi_encoded_t)next ^ cookie;
+  mi_block_set_next_secure(page->cookie,block,next);
+  #elif MI_RELATIVE_FREE
+  block->next = ((mi_encoded_t)next - (uintptr_t)block) - page->block_size;
   #else
-  UNUSED(cookie);
+  UNUSED(page);
   block->next = (mi_encoded_t)next;
   #endif
 }
 
-static inline mi_block_t* mi_block_next(mi_page_t* page, mi_block_t* block) {
-  #if MI_SECURE
-  return mi_block_nextx(page->cookie,block);
-  #else
-  UNUSED(page);
-  return mi_block_nextx(0, block);
-  #endif
-}
-
-static inline void mi_block_set_next(mi_page_t* page, mi_block_t* block, mi_block_t* next) {
-  #if MI_SECURE
-  mi_block_set_nextx(page->cookie,block,next);
-  #else
-  UNUSED(page);
-  mi_block_set_nextx(0, block, next);
-  #endif
+static inline bool mi_mem_is_zero(void* p, size_t size) {
+  for (size_t i = 0; i < size; i++) {
+    if (((uint8_t*)p)[i] != 0) return false;
+  }
+  return true;
 }
 
 // -------------------------------------------------------------------

@@ -14,6 +14,7 @@ terms of the MIT license. A copy of the license can be found in the file
 #include "mimalloc.h"
 #include "mimalloc-internal.h"
 #include "mimalloc-atomic.h"
+#include <string.h>
 
 /* -----------------------------------------------------------
   Definition of page queues for each block size
@@ -62,7 +63,9 @@ static bool mi_page_list_is_valid(mi_page_t* page, mi_block_t* p) {
   mi_block_t* start = (mi_block_t*)page_area;
   mi_block_t* end   = (mi_block_t*)(page_area + psize);
   while(p != NULL) {
-    if (p < start || p >= end) return false;
+    if (p < start || p >= end) {
+      return false;
+    }
     p = mi_block_next(page, p);
   }
   return true;
@@ -84,11 +87,7 @@ static bool mi_page_is_valid_init(mi_page_t* page) {
   #if 0
   if (page->flags.is_zero) {
     for(mi_block_t* block = page->free; block != NULL; mi_block_next(page,block)) {
-      for (size_t i = 1; i < (page->block_size/sizeof(uintptr_t)); i++) {
-        if (((uintptr_t*)block)[i] != 0) {
-          return false;
-        }
-      }
+      mi_assert_internal(mi_mem_is_zero(block + 1, page->block_size - sizeof(mi_block_t)));
     }
   }
   #endif
@@ -280,7 +279,7 @@ void _mi_heap_delayed_free(mi_heap_t* heap) {
 
   // and free them all
   while(block != NULL) {
-    mi_block_t* next = mi_block_nextx(heap->cookie,block);
+    mi_block_t* next = mi_block_next_secure(heap->cookie,block);
     // use internal free instead of regular one to keep stats etc correct
     if (!_mi_free_delayed_block(block)) {
       // we might already start delayed freeing while another thread has not yet
@@ -288,7 +287,7 @@ void _mi_heap_delayed_free(mi_heap_t* heap) {
       mi_block_t* dfree;
       do {
         dfree = (mi_block_t*)heap->thread_delayed_free;
-        mi_block_set_nextx(heap->cookie, block, dfree);
+        mi_block_set_next_secure(heap->cookie, block, dfree);
       } while (!mi_atomic_cas_ptr_weak(mi_atomic_cast(void*,&heap->thread_delayed_free), block, dfree));
 
     }
@@ -343,7 +342,7 @@ void _mi_page_abandon(mi_page_t* page, mi_page_queue_t* pq) {
   _mi_page_use_delayed_free(page,MI_NEVER_DELAYED_FREE);
 #if MI_DEBUG>1
   // check there are no references left..
-  for (mi_block_t* block = (mi_block_t*)page->heap->thread_delayed_free; block != NULL; block = mi_block_nextx(page->heap->cookie,block)) {
+  for (mi_block_t* block = (mi_block_t*)page->heap->thread_delayed_free; block != NULL; block = mi_block_next_secure(page->heap->cookie,block)) {
     mi_assert_internal(_mi_ptr_page(block) != page);
   }
 #endif
@@ -433,6 +432,7 @@ void _mi_page_retire(mi_page_t* page) {
 #define MI_MAX_SLICES       (1UL << MI_MAX_SLICE_SHIFT)
 #define MI_MIN_SLICES       (2)
 
+#if !MI_RELATIVE_FREE
 static void mi_page_free_list_extend_secure(mi_heap_t* heap, mi_page_t* page, size_t extend, mi_stats_t* stats) {
   UNUSED(stats);
   mi_assert_internal(page->free == NULL);
@@ -508,6 +508,47 @@ static void mi_page_free_list_extend( mi_page_t* page, size_t extend, mi_stats_t
   page->free = start;
 }
 
+#else
+// if next pointers in the free list are encoded relatively, 
+// an area of zero is a valid free list where each one points to the next.
+// The final block needs to be set to NULL though.
+static void mi_page_free_list_extend_relative(mi_page_t* const page, const size_t extend, mi_stats_t* const stats)
+{
+  UNUSED(stats);
+  mi_assert_internal(page->free == NULL);
+  mi_assert_internal(page->local_free == NULL);
+  mi_assert_internal(page->capacity + extend <= page->reserved);
+  void* const page_area = _mi_page_start(_mi_page_segment(page), page, NULL);
+  const size_t bsize = page->block_size;
+  mi_block_t* const start = mi_page_block_at(page, page_area, page->capacity); 
+  mi_block_t* const last = mi_page_block_at(page, page_area, page->capacity + extend - 1);
+
+  if (page->is_zero_init) {
+    // zero is a valid free list; just NULL the end
+    mi_assert_expensive(mi_mem_is_zero(start, ((uint8_t*)last - (uint8_t*)start) + bsize));
+    page->flags.is_zero = true;
+  }
+  else if (bsize <= 4*sizeof(uintptr_t)) {
+    // probably cheaper to memset 0
+    memset(start, 0, ((uint8_t*)last - (uint8_t*)start) + bsize);
+    page->flags.is_zero = true;
+  }
+  else {
+    // initialize by setting all next pointers explicitly
+    mi_block_t* block = start;
+    while (block <= last) {
+      mi_block_t* next = (mi_block_t*)((uint8_t*)block + bsize);
+      block->next = 0; // == mi_block_set_next(page,block,next);
+      block = next;
+    }
+  }
+  mi_block_set_next(page, last, NULL);
+  mi_assert_internal(mi_block_next(page,last)==NULL);
+  page->free = start;
+  mi_assert_internal(mi_page_list_is_valid(page, page->free));
+}
+#endif
+
 /* -----------------------------------------------------------
   Page initialize and extend the capacity
 ----------------------------------------------------------- */
@@ -532,15 +573,14 @@ static void mi_page_extend_free(mi_heap_t* heap, mi_page_t* page, mi_stats_t* st
   if (page->free != NULL) return;
   if (page->capacity >= page->reserved) return;
 
-  size_t page_size;
+  size_t page_size = 0;
   _mi_page_start(_mi_page_segment(page), page, &page_size);
   _mi_stat_increase(&stats->pages_extended, 1);
 
   // calculate the extend count
   size_t extend = page->reserved - page->capacity;
   size_t max_extend = MI_MAX_EXTEND_SIZE/page->block_size;
-  if (max_extend < MI_MIN_EXTEND) max_extend = MI_MIN_EXTEND;
-
+  if (max_extend < MI_MIN_EXTEND) max_extend = MI_MIN_EXTEND;  
   if (extend > max_extend) {
     // ensure we don't touch memory beyond the page to reduce page commit.
     // the `lean` benchmark tests this. Going from 1 to 8 increases rss by 50%.
@@ -551,12 +591,17 @@ static void mi_page_extend_free(mi_heap_t* heap, mi_page_t* page, mi_stats_t* st
   mi_assert_internal(extend < (1UL<<16));
 
   // and append the extend the free list
+  #if MI_RELATIVE_FREE
+  UNUSED(heap);
+  mi_page_free_list_extend_relative(page,extend,stats);
+  #else
   if (extend < MI_MIN_SLICES || !mi_option_is_enabled(mi_option_secure)) {
     mi_page_free_list_extend(page, extend, stats );
   }
   else {
     mi_page_free_list_extend_secure(heap, page, extend, stats);
   }
+  #endif
   // enable the new free list
   page->capacity += (uint16_t)extend;
   _mi_stat_increase(&stats->page_committed, extend * page->block_size);

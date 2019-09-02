@@ -34,12 +34,15 @@ terms of the MIT license. A copy of the license can be found in the file
 // and to 3 to do extensive invariant checking.
 #if !defined(MI_DEBUG)
 #if !defined(NDEBUG) || defined(_DEBUG)
-#define MI_DEBUG 1
+#define MI_DEBUG 3
 #else
 #define MI_DEBUG 0
 #endif
 #endif
 
+#if MI_SECURE==0
+#define MI_RELATIVE_FREE 0  // experimental
+#endif
 
 // ------------------------------------------------------
 // Platform specific values
