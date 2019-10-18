@@ -51,12 +51,6 @@ static mi_option_desc_t options[_mi_option_last] =
   { 0, UNINIT, MI_OPTION(show_stats) },
   { 0, UNINIT, MI_OPTION(verbose) },
 
-  #if MI_SECURE
-  { MI_SECURE, INITIALIZED, MI_OPTION(secure) }, // in a secure build the environment setting is ignored
-  #else
-  { 0, UNINIT, MI_OPTION(secure) },
-  #endif
-
   // the following options are experimental and not all combinations make sense.
   { 1, UNINIT, MI_OPTION(eager_commit) },        // note: needs to be on when eager_region_commit is enabled
   #ifdef _WIN32   // and BSD?
@@ -146,25 +140,70 @@ static void mi_out_stderr(const char* msg) {
   #endif
 }
 
+// Since an output function can be registered earliest in the `main`
+// function we also buffer output that happens earlier. When
+// an output function is registered it is called immediately with
+// the output up to that point.
+#ifndef MI_MAX_DELAY_OUTPUT
+#define MI_MAX_DELAY_OUTPUT (32*1024)
+#endif
+static char out_buf[MI_MAX_DELAY_OUTPUT+1];
+static _Atomic(uintptr_t) out_len;
+
+static void mi_out_buf(const char* msg) {
+  if (msg==NULL) return;
+  if (mi_atomic_read_relaxed(&out_len)>=MI_MAX_DELAY_OUTPUT) return;
+  size_t n = strlen(msg);
+  if (n==0) return;
+  // claim space
+  uintptr_t start = mi_atomic_addu(&out_len, n);
+  if (start >= MI_MAX_DELAY_OUTPUT) return;
+  // check bound
+  if (start+n >= MI_MAX_DELAY_OUTPUT) {
+    n = MI_MAX_DELAY_OUTPUT-start-1;
+  }
+  memcpy(&out_buf[start], msg, n);
+}
+
+static void mi_out_buf_flush(mi_output_fun* out) {
+  if (out==NULL) return;
+  // claim all (no more output will be added after this point)
+  size_t count = mi_atomic_addu(&out_len, MI_MAX_DELAY_OUTPUT);
+  // and output the current contents
+  if (count>MI_MAX_DELAY_OUTPUT) count = MI_MAX_DELAY_OUTPUT;
+  out_buf[count] = 0;
+  out(out_buf);
+}
+
+// The initial default output, outputs to stderr and the delayed output buffer.
+static void mi_out_buf_stderr(const char* msg) {
+  mi_out_stderr(msg);
+  mi_out_buf(msg);
+}
+
+
 // --------------------------------------------------------
 // Default output handler
 // --------------------------------------------------------
 
+// Should be atomic but gives errors on many platforms as generally we cannot cast a function pointer to a uintptr_t.
+// For now, don't register output from multiple threads.
 #pragma warning(suppress:4180)
-static volatile _Atomic(mi_output_fun*) mi_out_default; // = NULL
+static mi_output_fun* volatile mi_out_default; // = NULL
 
 static mi_output_fun* mi_out_get_default(void) {
-  mi_output_fun* out = (mi_output_fun*)mi_atomic_read_ptr(mi_atomic_cast(void*, &mi_out_default));
-  return (out == NULL ? &mi_out_stderr : out);
+  mi_output_fun* out = mi_out_default;
+  return (out == NULL ? &mi_out_buf_stderr : out);
 }
 
 void mi_register_output(mi_output_fun* out) mi_attr_noexcept {
-  mi_atomic_write_ptr(mi_atomic_cast(void*,&mi_out_default),out);
+  mi_out_default = (out == NULL ? &mi_out_stderr : out); // stop using the delayed output buffer
+  if (out!=NULL) mi_out_buf_flush(out);  // output the delayed output now
 }
 
 
 // --------------------------------------------------------
-// Messages
+// Messages, all end up calling `_mi_fputs`.
 // --------------------------------------------------------
 #define MAX_ERROR_COUNT (10)
 static volatile _Atomic(uintptr_t) error_count; // = 0;  // when MAX_ERROR_COUNT stop emitting errors and warnings
@@ -307,7 +346,7 @@ static void mi_option_init(mi_option_desc_t* desc) {
     size_t len = strlen(s);
     if (len >= sizeof(buf)) len = sizeof(buf) - 1;
     for (size_t i = 0; i < len; i++) {
-      buf[i] = toupper(s[i]);
+      buf[i] = (char)toupper(s[i]);
     }
     buf[len] = 0;
     if (buf[0]==0 || strstr("1;TRUE;YES;ON", buf) != NULL) {

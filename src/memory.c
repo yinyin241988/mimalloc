@@ -71,7 +71,7 @@ bool    _mi_os_is_huge_reserved(void* p);
 typedef uintptr_t mi_region_info_t;
 
 static inline mi_region_info_t mi_region_info_create(void* start, bool is_large, bool is_committed) {
-  return ((uintptr_t)start | ((is_large?1:0) << 1) | (is_committed?1:0));
+  return ((uintptr_t)start | ((uintptr_t)(is_large?1:0) << 1) | (is_committed?1:0));
 }
 
 static inline void* mi_region_info_read(mi_region_info_t info, bool* is_large, bool* is_committed) {
@@ -181,9 +181,9 @@ static bool mi_region_commit_blocks(mem_region_t* region, size_t idx, size_t bit
     else {
       // failed, another thread allocated just before us!
       // we assign it to a later slot instead (up to 4 tries).
-      // note: we don't need to increment the region count, this will happen on another allocation
       for(size_t i = 1; i <= 4 && idx + i < MI_REGION_MAX; i++) {
         if (mi_atomic_cas_strong(&regions[idx+i].info, info, 0)) {
+          mi_atomic_increment(&regions_count);
           start = NULL;
           break;
         }
@@ -204,6 +204,7 @@ static bool mi_region_commit_blocks(mem_region_t* region, size_t idx, size_t bit
   bool region_is_large = false;
   void* start = mi_region_info_read(info,&region_is_large,&region_is_committed);  
   mi_assert_internal(!(region_is_large && !*allow_large));
+  mi_assert_internal(start!=NULL);
 
   // set dirty bits
   uintptr_t m;
@@ -225,6 +226,7 @@ static bool mi_region_commit_blocks(mem_region_t* region, size_t idx, size_t bit
   }
 
   // and return the allocation  
+  mi_assert_internal(blocks_start != NULL);
   *allow_large = region_is_large;
   *p  = blocks_start;
   *id = (idx*MI_REGION_MAP_BITS) + bitidx;
@@ -278,6 +280,7 @@ static bool mi_region_alloc_blocks(mem_region_t* region, size_t idx, size_t bloc
   const uintptr_t mask = mi_region_block_mask(blocks, 0);
   const size_t bitidx_max = MI_REGION_MAP_BITS - blocks;
   uintptr_t map = mi_atomic_read(&region->map);
+  if (map==MI_REGION_MAP_FULL) return true;
 
   #ifdef MI_HAVE_BITSCAN
   size_t bitidx = mi_bsf(~map);    // quickly find the first zero bit if possible
@@ -385,7 +388,7 @@ void* _mi_mem_alloc_aligned(size_t size, size_t alignment, bool* commit, bool* l
   // find a range of free blocks
   void* p = NULL;
   size_t count = mi_atomic_read(&regions_count);
-  size_t idx = 0; // tld->region_idx; // start at 0 to reuse low addresses? Or, use tld->region_idx to reduce contention?
+  size_t idx = tld->region_idx; // start at 0 to reuse low addresses? Or, use tld->region_idx to reduce contention?
   for (size_t visited = 0; visited < count; visited++, idx++) {
     if (idx >= count) idx = 0;  // wrap around
     if (!mi_region_try_alloc_blocks(idx, blocks, size, commit, large, is_zero, &p, id, tld)) return NULL; // error
@@ -393,8 +396,8 @@ void* _mi_mem_alloc_aligned(size_t size, size_t alignment, bool* commit, bool* l
   }
 
   if (p == NULL) {
-    // no free range in existing regions -- try to extend beyond the count.. but at most 4 regions
-    for (idx = count; idx < count + 4 && idx < MI_REGION_MAX; idx++) {
+    // no free range in existing regions -- try to extend beyond the count.. but at most 8 regions
+    for (idx = count; idx < mi_atomic_read_relaxed(&regions_count) + 8 && idx < MI_REGION_MAX; idx++) {
       if (!mi_region_try_alloc_blocks(idx, blocks, size, commit, large, is_zero, &p, id, tld)) return NULL; // error
       if (p != NULL) break;
     }
@@ -402,12 +405,12 @@ void* _mi_mem_alloc_aligned(size_t size, size_t alignment, bool* commit, bool* l
 
   if (p == NULL) {
     // we could not find a place to allocate, fall back to the os directly
+    _mi_warning_message("unable to allocate from region: size %zu\n", size);
     *is_zero = true;
     p = _mi_os_alloc_aligned(size, alignment, commit, large, tld);
   }
   else {
-    tld->region_idx = idx;  // next start of search?
-
+    tld->region_idx = idx;  // next start of search? currently not used as we use first-fit
   }
 
   mi_assert_internal( p == NULL || (uintptr_t)p % alignment == 0);

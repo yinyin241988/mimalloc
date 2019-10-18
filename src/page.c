@@ -84,10 +84,10 @@ static bool mi_page_is_valid_init(mi_page_t* page) {
   mi_assert_internal(mi_page_list_is_valid(page,page->free));
   mi_assert_internal(mi_page_list_is_valid(page,page->local_free));
 
-  #if 0
+  #if MI_DEBUG>3 // generally too expensive to check this
   if (page->flags.is_zero) {
     for(mi_block_t* block = page->free; block != NULL; mi_block_next(page,block)) {
-      mi_assert_internal(mi_mem_is_zero(block + 1, page->block_size - sizeof(mi_block_t)));
+      mi_assert_expensive(mi_mem_is_zero(block + 1, page->block_size - sizeof(mi_block_t)));
     }
   }
   #endif
@@ -195,7 +195,7 @@ void _mi_page_free_collect(mi_page_t* page, bool force) {
       // usual case
       page->free = page->local_free;
       page->local_free = NULL;
-      page->flags.is_zero = false;
+      page->is_zero = false;
     }
     else if (force) {
       // append -- only on shutdown (force) as this is a linear operation
@@ -207,7 +207,7 @@ void _mi_page_free_collect(mi_page_t* page, bool force) {
       mi_block_set_next(page, tail, page->free);
       page->free = page->local_free;
       page->local_free = NULL;
-      page->flags.is_zero = false;
+      page->is_zero = false;
     }
   }
 
@@ -413,7 +413,7 @@ void _mi_page_retire(mi_page_t* page) {
   // if its neighbours are almost fully used.
   if (mi_likely(page->block_size <= (MI_SMALL_SIZE_MAX/4))) {
     if (mi_page_mostly_used(page->prev) && mi_page_mostly_used(page->next)) {
-      _mi_stat_counter_increase(&_mi_stats_main.page_no_retire,1);
+      mi_stat_counter_increase(_mi_stats_main.page_no_retire,1);
       return; // dont't retire after all
     }
   }
@@ -486,7 +486,7 @@ static void mi_page_free_list_extend_secure(mi_heap_t* heap, mi_page_t* page, si
   heap->random = _mi_random_shuffle(rnd);
 }
 
-static void mi_page_free_list_extend( mi_page_t* page, size_t extend, mi_stats_t* stats)
+static mi_decl_noinline void mi_page_free_list_extend( mi_page_t* page, size_t extend, mi_stats_t* stats)
 {
   UNUSED(stats);
   mi_assert_internal(page->free == NULL);
@@ -495,15 +495,15 @@ static void mi_page_free_list_extend( mi_page_t* page, size_t extend, mi_stats_t
   void* page_area = _mi_page_start(_mi_page_segment(page), page, NULL );
   size_t bsize = page->block_size;
   mi_block_t* start = mi_page_block_at(page, page_area, page->capacity);
-
+  
   // initialize a sequential free list
-  mi_block_t* last = mi_page_block_at(page, page_area, page->capacity + extend - 1);
+  mi_block_t* last = mi_page_block_at(page, page_area, page->capacity + extend - 1);  
   mi_block_t* block = start;
   while(block <= last) {
     mi_block_t* next = (mi_block_t*)((uint8_t*)block + bsize);
     mi_block_set_next(page,block,next);
     block = next;
-  }
+  }  
   mi_block_set_next(page, last, NULL);
   page->free = start;
 }
@@ -575,12 +575,13 @@ static void mi_page_extend_free(mi_heap_t* heap, mi_page_t* page, mi_stats_t* st
 
   size_t page_size = 0;
   _mi_page_start(_mi_page_segment(page), page, &page_size);
-  _mi_stat_increase(&stats->pages_extended, 1);
+  mi_stat_increase(stats->pages_extended, 1);
 
   // calculate the extend count
   size_t extend = page->reserved - page->capacity;
-  size_t max_extend = MI_MAX_EXTEND_SIZE/page->block_size;
-  if (max_extend < MI_MIN_EXTEND) max_extend = MI_MIN_EXTEND;  
+  size_t max_extend = (page->block_size >= MI_MAX_EXTEND_SIZE ? MI_MIN_EXTEND : MI_MAX_EXTEND_SIZE/(uint32_t)page->block_size);
+  if (max_extend < MI_MIN_EXTEND) max_extend = MI_MIN_EXTEND;
+
   if (extend > max_extend) {
     // ensure we don't touch memory beyond the page to reduce page commit.
     // the `lean` benchmark tests this. Going from 1 to 8 increases rss by 50%.
@@ -595,7 +596,7 @@ static void mi_page_extend_free(mi_heap_t* heap, mi_page_t* page, mi_stats_t* st
   UNUSED(heap);
   mi_page_free_list_extend_relative(page,extend,stats);
   #else
-  if (extend < MI_MIN_SLICES || !mi_option_is_enabled(mi_option_secure)) {
+  if (extend < MI_MIN_SLICES || MI_SECURE==0) { //!mi_option_is_enabled(mi_option_secure)) {
     mi_page_free_list_extend(page, extend, stats );
   }
   else {
@@ -604,11 +605,11 @@ static void mi_page_extend_free(mi_heap_t* heap, mi_page_t* page, mi_stats_t* st
   #endif
   // enable the new free list
   page->capacity += (uint16_t)extend;
-  _mi_stat_increase(&stats->page_committed, extend * page->block_size);
+  mi_stat_increase(stats->page_committed, extend * page->block_size);
 
   // extension into zero initialized memory preserves the zero'd free list
   if (!page->is_zero_init) {
-    page->flags.is_zero = false;
+    page->is_zero = false;
   }
   mi_assert_expensive(mi_page_is_valid_init(page));
 }
@@ -628,7 +629,7 @@ static void mi_page_init(mi_heap_t* heap, mi_page_t* page, size_t block_size, mi
   #if MI_SECURE
   page->cookie = _mi_heap_random(heap) | 1;
   #endif
-  page->flags.is_zero = page->is_zero_init;
+  page->is_zero = page->is_zero_init;
 
   mi_assert_internal(page->capacity == 0);
   mi_assert_internal(page->free == NULL);
@@ -702,7 +703,7 @@ static mi_page_t* mi_page_queue_find_free_ex(mi_heap_t* heap, mi_page_queue_t* p
     page = next;
   } // for each page
 
-  _mi_stat_counter_increase(&heap->tld->stats.searches,count);
+  mi_stat_counter_increase(heap->tld->stats.searches,count);
 
   if (page == NULL) {
     page = rpage;
@@ -728,7 +729,7 @@ static inline mi_page_t* mi_find_free_page(mi_heap_t* heap, size_t size) {
   mi_page_queue_t* pq = mi_page_queue(heap,size);
   mi_page_t* page = pq->first;
   if (page != NULL) {
-    if (mi_option_get(mi_option_secure) >= 3 && page->capacity < page->reserved && ((_mi_heap_random(heap) & 1) == 1)) {
+    if ((MI_SECURE >= 3) && page->capacity < page->reserved && ((_mi_heap_random(heap) & 1) == 1)) {
       // in secure mode, we extend half the time to increase randomness
       mi_page_extend_free(heap, page, &heap->tld->stats);
       mi_assert_internal(mi_page_immediate_available(page));
@@ -751,12 +752,14 @@ static inline mi_page_t* mi_find_free_page(mi_heap_t* heap, size_t size) {
   a certain number of allocations.
 ----------------------------------------------------------- */
 
-static mi_deferred_free_fun* deferred_free = NULL;
+static mi_deferred_free_fun* volatile deferred_free = NULL;
 
 void _mi_deferred_free(mi_heap_t* heap, bool force) {
   heap->tld->heartbeat++;
-  if (deferred_free != NULL) {
+  if (deferred_free != NULL && !heap->tld->recurse) {
+    heap->tld->recurse = true;
     deferred_free(force, heap->tld->heartbeat);
+    heap->tld->recurse = false;
   }
 }
 
@@ -774,7 +777,7 @@ void mi_register_deferred_free(mi_deferred_free_fun* fn) mi_attr_noexcept {
 // just that page, we always treat them as abandoned and any thread
 // that frees the block can free the whole page and segment directly.
 static mi_page_t* mi_huge_page_alloc(mi_heap_t* heap, size_t size) {
-  size_t block_size = _mi_wsize_from_size(size) * sizeof(uintptr_t);
+  size_t block_size = _mi_os_good_alloc_size(size);
   mi_assert_internal(_mi_bin(block_size) == MI_BIN_HUGE);  
   mi_page_t* page = mi_page_fresh_alloc(heap,NULL,block_size);
   if (page != NULL) {
