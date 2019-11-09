@@ -47,48 +47,70 @@ int   _mi_os_numa_node_count(void);
 ----------------------------------------------------------- */
 
 #define MI_SEGMENT_ALIGN      MI_SEGMENT_SIZE
-#define MI_ARENA_BLOCK_SIZE   (8*MI_SEGMENT_ALIGN)     // 32MiB
-#define MI_ARENA_MAX_OBJ_SIZE (MI_BITMAP_FIELD_BITS * MI_ARENA_BLOCK_SIZE)  // 2GiB
-#define MI_ARENA_MIN_OBJ_SIZE (MI_ARENA_BLOCK_SIZE/2)  // 16MiB
-#define MI_MAX_ARENAS         (64)                     // not more than 256 (since we use 8 bits in the memid)
+#define MI_ARENA_BLOCK_SIZE   MI_SEGMENT_SIZE
+
+#define MI_ARENA_DEFAULT_SIZE (MI_BITMAP_FIELD_BITS * MI_ARENA_BLOCK_SIZE)        // 256MiB (64MiB on 32-bit)
+
+#if MI_INTPTR_SIZE >= 8
+#define MI_MAX_ARENAS         ((256 * GiB) / MI_ARENA_DEFAULT_SIZE)               // 1024 (at most 256GiB in default arenas)
+#else
+#define MI_MAX_ARENAS         ((3 * GiB) / MI_ARENA_DEFAULT_SIZE)                 // 48 (at most 3GiB in default arenas)
+#endif
+
+// Define in a packed way as we statically allocate MAX_ARENAS for 3 lists (3*1024*(4*8) = 96KiB on 64 bit)
+
+// Use either a direct bitmap field or a pointer to the fields for large arena's
+typedef union mi_arena_bitmap_u {
+  mi_bitmap_field_t  field;
+  mi_bitmap_field_t* bitmap;
+} mi_arena_bitmap_t;
 
 // A memory arena descriptor
 typedef struct mi_arena_s {
-  uint8_t* start;                         // the start of the memory area
-  size_t   block_count;                   // size of the area in arena blocks (of `MI_ARENA_BLOCK_SIZE`)
-  size_t   field_count;                   // number of bitmap fields
-  int      numa_node;                     // associated NUMA node
-  bool     is_zero_init;                  // is the arena zero initialized?
-  bool     is_large;                      // large OS page allocated
-  volatile _Atomic(uintptr_t) search_idx; // optimization to start the search for free blocks
-  mi_bitmap_field_t* blocks_dirty;        // are the blocks potentially non-zero?
-  mi_bitmap_field_t  blocks_map[1];       // bitmap of in-use blocks 
+  uint8_t*   start;                       // the start of the memory area
+  int16_t    numa_node;                   // associated NUMA node + 1
+  uint16_t   field_count;                 // number of bitmap fields
+  uint16_t   block_count;                 // size of the area in arena blocks (of `MI_ARENA_BLOCK_SIZE`)
+  uint8_t    is_zero_init : 1;            // is the arena zero initialized?
+  uint8_t    is_fixed : 1;                // fixed memory (cannot be decommitted or reset) (like large OS pages)
+  uint8_t    is_committed : 1;            // is the memory committed
+  mi_arena_bitmap_t  blocks_map;           // bitmap of in-use blocks
+  mi_arena_bitmap_t  blocks_dirty;         // are the blocks potentially non-zero?
+  _Atomic(uintptr_t) search_idx;
 } mi_arena_t;
 
 
-// The available arenas
-static _Atomic(mi_arena_t*) mi_arenas[MI_MAX_ARENAS];
-static _Atomic(uintptr_t)   mi_arena_count; // = 0
+// There are 3 arena lists: reserved, committed, and fixed memory
+#define MI_ARENA_KINDS (3)
+typedef enum mi_arena_kind_e {
+  mi_arena_fixed,
+  mi_arena_committed,
+  mi_arena_reserved
+} mi_arena_kind_t;
+
+static mi_arena_t mi_arenas[MI_ARENA_KINDS*MI_MAX_ARENAS];
+static _Atomic(uintptr_t) mi_arenas_count[MI_ARENA_KINDS];
+
 
 
 /* -----------------------------------------------------------
-  Arena allocations get a memory id where the lower 8 bits are
-  the arena index +1, and the upper bits the block index.
+  Arena allocations get a memory id where the lower 16 bits are
+  the arena index +1, and the upper bits the bitmap index.
 ----------------------------------------------------------- */
 
 // Use `0` as a special id for direct OS allocated memory.
 #define MI_MEMID_OS   0
 
 static size_t mi_memid_create(size_t arena_index, mi_bitmap_index_t bitmap_index) {
-  mi_assert_internal(arena_index < 0xFE);
-  mi_assert_internal(((bitmap_index << 8) >> 8) == bitmap_index); // no overflow?
-  return ((bitmap_index << 8) | ((arena_index+1) & 0xFF));
+  mi_assert_internal(arena_index < 0xFFFF);
+  mi_assert_internal(((bitmap_index << 16) >> 16) == bitmap_index); // no overflow?
+  return ((bitmap_index << 16) | ((arena_index+1) & 0xFFFF));
 }
 
 static void mi_memid_indices(size_t memid, size_t* arena_index, mi_bitmap_index_t* bitmap_index) {
   mi_assert_internal(memid != MI_MEMID_OS);
-  *arena_index = (memid & 0xFF) - 1;
-  *bitmap_index = (memid >> 8);
+  *arena_index = (memid & 0xFFFF) - 1;
+  *bitmap_index = (memid >> 16);
 }
 
 static size_t mi_block_count_of_size(size_t size) {
@@ -98,7 +120,75 @@ static size_t mi_block_count_of_size(size_t size) {
 /* -----------------------------------------------------------
   Thread safe allocation in an arena
 ----------------------------------------------------------- */
-static bool mi_arena_alloc(mi_arena_t* arena, size_t blocks, mi_bitmap_index_t* bitmap_idx) 
+
+static bool mi_arena_try_claim(mi_arena_t* const arena, int numa_node, size_t blocks, mi_bitmap_index_t* bitmap_idx)
+{
+  const size_t fcount = arena->field_count;
+  mi_assert_internal(fcount>0);
+  if (numa_node>=0) {
+    const int nnode = arena->numa_node-1;
+    if (nnode>=0&&nnode!=numa_node) { return false; } // arena is not on the same NUMA node
+  }
+  if (mi_likely(fcount==1)) {
+    // single field bitmap
+    return mi_bitmap_try_claim_field(&arena->blocks_map.field, 0, blocks, bitmap_idx);
+  }
+  else {
+    // larger bitmap (like for reserved huge OS pages)
+    size_t idx = mi_atomic_read(&arena->search_idx);  // start from last search
+    for (size_t visited = 0; visited<fcount; visited++, idx++) {
+      if (idx>=fcount) idx = 0;  // wrap around
+      if (mi_bitmap_try_claim_field(arena->blocks_map.bitmap, idx, blocks, bitmap_idx)) {
+        mi_atomic_write(&arena->search_idx, idx);  // start search from here next time
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+static bool mi_arenas_try_claim(mi_arena_t* arenas, size_t arena_count, size_t start_idx, int numa_node, size_t blocks, size_t* arena_idx, mi_bitmap_index_t* bitmap_idx) 
+{
+  size_t i = start_idx;
+  for (size_t visited = 0; visited < arena_count; visited++, i++ ) {
+    if (i>=arena_count) { i = 0; }  // wrap around
+    if (mi_arena_try_claim(&arenas[i], numa_node, blocks, bitmap_idx)) {
+      *arena_idx = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool mi_arena_kind_try_alloc(mi_arena_kind_t kind, int numa_node, size_t blocks, size_t* arena_idx, mi_bitmap_index_t* bitmap_idx, mi_os_tld_t* tld) 
+{
+  mi_arena_t* arenas = &mi_arenas[kind*MI_MAX_ARENAS];
+  size_t arenas_count = mi_atomic_read_relaxed(&mi_arenas_count[kind]);
+  return mi_arenas_try_claim(arenas, arenas_count, tld->arena_idx[kind], numa_node, blocks, arena_idx, bitmap_idx);
+}
+
+static bool mi_arena_try_alloc(size_t blocks, bool commit, bool large, size_t* arena_idx, mi_bitmap_index_t* bitmap_idx, mi_os_tld_t* tld) 
+{
+  int numa_node = (_mi_os_numa_node_count()<=1 ? -1 : _mi_os_numa_node(tld));
+  if (commit&&large) {
+    if (mi_arena_kind_try_alloc(mi_arena_fixed, numa_node, blocks, &arena_idx, &bitmap_idx, tld)) return true;
+  }
+  if (commit) {
+    if (mi_arena_kind_try_alloc(mi_arena_committed, numa_node, blocks, &arena_idx, &bitmap_idx, tld)) return true;
+  }
+  if (mi_arena_kind_try_alloc(mi_arena_reserved, numa_node, blocks, &arena_idx, &bitmap_idx, tld)) return true;
+
+  // failed to allocate, try to allocate on a different numa node for large OS page memory
+  if (numa_node >= 0 && commit && large) {
+    if (mi_arena_kind_try_alloc(mi_arena_fixed, -1, blocks, &arena_idx, &bitmap_idx, tld)) return true;
+  }
+
+  // failed to allocate
+  return false;
+}
+
+
+static bool mi_arena_allocx(mi_arena_t* arena, size_t blocks, mi_bitmap_index_t* bitmap_idx) 
 {
   const size_t fcount = arena->field_count;
   size_t idx = mi_atomic_read(&arena->search_idx);  // start from last search
