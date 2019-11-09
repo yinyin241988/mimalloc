@@ -234,7 +234,7 @@ static void mi_segment_os_free(mi_segment_t* segment, size_t segment_size, mi_se
     mi_assert_internal(!segment->mem_is_fixed);
     _mi_mem_unprotect(segment, segment->segment_size); // ensure no more guard pages are set
   }
-  _mi_mem_free(segment, segment_size, segment->memid, tld->stats);
+  _mi_arena_free(segment, segment_size, segment->memid, tld->stats);
 }
 
 
@@ -360,7 +360,7 @@ static mi_segment_t* mi_segment_alloc(size_t required, mi_page_kind_t page_kind,
     // Allocate the segment from the OS
     size_t memid;
     bool   mem_large = (!eager_delay && (MI_SECURE==0)); // only allow large OS pages once we are no longer lazy    
-    segment = (mi_segment_t*)_mi_mem_alloc_aligned(segment_size, MI_SEGMENT_SIZE, &commit, &mem_large, &is_zero, &memid, os_tld);
+    segment = (mi_segment_t*)_mi_arena_alloc_aligned(segment_size, MI_SEGMENT_SIZE, &commit, &mem_large, &is_zero, &memid, os_tld);
     if (segment == NULL) return NULL;  // failed to allocate
     if (!commit) {
       // ensure the initial info is committed

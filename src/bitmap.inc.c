@@ -61,6 +61,7 @@ static inline size_t mi_bitmap_index_bit(mi_bitmap_index_t bitmap_idx) {
 // The bit mask for a given number of blocks at a specified bit index.
 static uintptr_t mi_bitmap_mask_(size_t count, size_t bitidx) {
   mi_assert_internal(count + bitidx <= MI_BITMAP_FIELD_BITS);
+  if (count==MI_BITMAP_FIELD_BITS) return MI_BITMAP_FIELD_FULL;
   return ((((uintptr_t)1 << count) - 1) << bitidx);
 }
 
@@ -192,5 +193,16 @@ static inline bool mi_bitmap_claim(mi_bitmap_t bitmap, size_t bitmap_fields, siz
   uintptr_t prev = mi_atomic_or(&bitmap[idx], mask);
   return ((prev & mask) == 0);
 }
+
+// Returns `true` if all `count` bits are 1
+static inline bool mi_bitmap_is_claimed(mi_bitmap_t bitmap, size_t bitmap_fields, size_t count, mi_bitmap_index_t bitmap_idx) {
+  const size_t idx = mi_bitmap_index_field(bitmap_idx);
+  const size_t bitidx = mi_bitmap_index_bit_in_field(bitmap_idx);
+  const uintptr_t mask = mi_bitmap_mask_(count, bitidx);
+  mi_assert_internal(bitmap_fields>idx); UNUSED(bitmap_fields);
+  // mi_assert_internal((bitmap[idx] & mask) == 0);
+  return ((mi_atomic_read(&bitmap[idx]) & mask) == mask);
+}
+
 
 #endif

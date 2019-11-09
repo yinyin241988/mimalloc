@@ -76,6 +76,7 @@ terms of the MIT license. A copy of the license can be found in the file
 #endif
 
 #define MI_INTPTR_SIZE  (1<<MI_INTPTR_SHIFT)
+#define MI_INTPTR_BITS  (8*MI_INTPTR_SIZE)
 
 #define KiB     ((size_t)1024)
 #define MiB     (KiB*KiB)
@@ -413,6 +414,7 @@ typedef struct mi_segments_tld_s {
 // OS thread local data
 typedef struct mi_os_tld_s {
   size_t              region_idx;   // start point for next allocation
+  size_t              arena_idx[3]; // start point for arena allocation
   mi_stats_t*         stats;        // points to tld stats
 } mi_os_tld_t;
 

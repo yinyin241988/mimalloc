@@ -59,9 +59,15 @@ size_t     _mi_os_good_alloc_size(size_t size);
 int        _mi_os_numa_node(mi_os_tld_t* tld);
 int        _mi_os_numa_node_count(void);
 
+// arena.c
+void       _mi_arena_free(void* p, size_t size, size_t memid, mi_stats_t* stats);
+void*      _mi_arena_alloc(size_t size, bool* commit, bool* large, bool* is_zero, size_t* memid, mi_os_tld_t* tld);
+void*      _mi_arena_alloc_aligned(size_t size, size_t alignment, bool* commit, bool* large, bool* is_zero, size_t* memid, mi_os_tld_t* tld);
+
+
 // memory.c
-void*      _mi_mem_alloc_aligned(size_t size, size_t alignment, bool* commit, bool* large, bool* is_zero, size_t* id, mi_os_tld_t* tld);
-void       _mi_mem_free(void* p, size_t size, size_t id, mi_stats_t* stats);
+//void*      _mi_mem_alloc_aligned(size_t size, size_t alignment, bool* commit, bool* large, bool* is_zero, size_t* id, mi_os_tld_t* tld);
+//void       _mi_mem_free(void* p, size_t size, size_t id, mi_stats_t* stats);
 
 bool       _mi_mem_reset(void* p, size_t size, mi_stats_t* stats);
 bool       _mi_mem_unreset(void* p, size_t size, bool* is_zero, mi_stats_t* stats);
