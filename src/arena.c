@@ -251,10 +251,11 @@ static bool mi_arena_add(mi_arena_kind_t kind, bool is_static, void* start, size
 static bool mi_arena_try_alloc_from_os(size_t blocks, bool commit, bool allow_large, size_t* arena_idx, mi_bitmap_index_t* bitmap_idx, mi_os_tld_t* tld) {
   if (blocks*MI_ARENA_BLOCK_SIZE > MI_ARENA_MAX_OBJ_SIZE) return false; // not too large?
   mi_assert_internal(MI_ARENA_SIZE>=blocks*MI_ARENA_BLOCK_SIZE);
-  bool is_large = allow_large;
-  void* start = _mi_os_alloc_aligned(MI_ARENA_SIZE, MI_SEGMENT_ALIGN, commit, &is_large, tld);
+  bool do_commit = commit && mi_option_is_enabled(mi_option_eager_region_commit);
+  bool is_large = allow_large && mi_option_is_enabled(mi_option_large_os_pages);
+  void* start = _mi_os_alloc_aligned(MI_ARENA_SIZE, MI_SEGMENT_ALIGN, do_commit, &is_large, tld);
   if (start==NULL) return false;
-  mi_arena_kind_t kind = (is_large ? mi_arena_fixed : (commit ? mi_arena_committed : mi_arena_reserved));
+  mi_arena_kind_t kind = (is_large ? mi_arena_fixed : (do_commit ? mi_arena_committed : mi_arena_reserved));
   if (!mi_arena_add(kind, false, start, MI_ARENA_BLOCK_COUNT, _mi_os_numa_node(tld), blocks, NULL, NULL, arena_idx, bitmap_idx)) {
     _mi_os_free(start, MI_ARENA_SIZE, tld->stats);
     return false;
