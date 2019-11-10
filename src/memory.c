@@ -48,6 +48,7 @@ bool    _mi_os_decommit(void* p, size_t size, mi_stats_t* stats);
 bool    _mi_os_reset(void* p, size_t size, mi_stats_t* stats);
 bool    _mi_os_unreset(void* p, size_t size, bool* is_zero, mi_stats_t* stats);
 
+#if 0
 // arena.c
 void    _mi_arena_free(void* p, size_t size, size_t memid, mi_stats_t* stats);
 void*   _mi_arena_alloc(size_t size, bool* commit, bool* large, bool* is_zero, size_t* memid, mi_os_tld_t* tld);
@@ -478,7 +479,7 @@ void _mi_mem_collect(mi_stats_t* stats) {
     }
   }
 }
-
+#endif
 
 /* ----------------------------------------------------------------------------
   Other

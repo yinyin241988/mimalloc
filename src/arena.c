@@ -36,6 +36,7 @@ of 256MiB in practice.
 // os.c
 void* _mi_os_alloc_aligned(size_t size, size_t alignment, bool commit, bool* large, mi_os_tld_t* tld);
 void  _mi_os_free(void* p, size_t size, mi_stats_t* stats);
+bool  _mi_os_commit(void* p, size_t size, bool* is_zero, mi_stats_t* stats);
 
 void* _mi_os_alloc_huge_os_pages(size_t pages, int numa_node, mi_msecs_t max_secs, size_t* pages_reserved, size_t* psize);
 void  _mi_os_free_huge_pages(void* p, size_t size, mi_stats_t* stats);
@@ -138,6 +139,18 @@ static mi_bitmap_t mi_arena_bitmap_com(mi_arena_t* arena) {
   return (mi_atomic_read_relaxed(&arena->field_count)==1 ? &arena->blocks_com.field : arena->blocks_com.bitmap);
 }
 
+static mi_arena_t* mi_arena_get(mi_arena_kind_t kind, bool is_static, size_t* arena_count) {
+  if (arena_count!=NULL) {
+    *arena_count = mi_atomic_read_relaxed(is_static ? &mi_arenas_static_count[kind] : &mi_arenas_count[kind]);
+  }
+  // ofs = kind*(MI_MAX_ARENAS+MI_MAX_STATIC_ARENAS) + (is_static ? 0 : MI_MAX_STATIC_ARENAS)
+  size_t ofs = 0;
+  if (kind==mi_arena_committed)     ofs = MI_MAX_ARENAS+MI_MAX_STATIC_ARENAS;
+  else if (kind==mi_arena_reserved) ofs = 2*(MI_MAX_ARENAS+MI_MAX_STATIC_ARENAS);
+  if (!is_static) ofs += MI_MAX_STATIC_ARENAS;
+  return &mi_arenas[ofs];
+}
+
 /* -----------------------------------------------------------
   Thread safe allocation in an arena
 ----------------------------------------------------------- */
@@ -174,19 +187,7 @@ static bool mi_arenas_try_claim(mi_arena_t* arenas, size_t arena_count, size_t s
   return false;
 }
 
-static mi_arena_t* mi_arena_get(mi_arena_kind_t kind, bool is_static, size_t* arena_count) {
-  if (arena_count!=NULL) {
-    *arena_count = mi_atomic_read_relaxed(is_static ? &mi_arenas_static_count[kind] : &mi_arenas_count[kind]);
-  }
-  // ofs = kind*(MI_MAX_ARENAS+MI_MAX_STATIC_ARENAS) + (is_static ? 0 : MI_MAX_STATIC_ARENAS)
-  size_t ofs = 0;
-  if (kind==mi_arena_committed)     ofs = MI_MAX_ARENAS+MI_MAX_STATIC_ARENAS;
-  else if (kind==mi_arena_reserved) ofs = 2*(MI_MAX_ARENAS+MI_MAX_STATIC_ARENAS);
-  if (!is_static) ofs += MI_MAX_STATIC_ARENAS;
-  return &mi_arenas[ofs];
-}
-
-static bool mi_arena_kind_try_alloc(mi_arena_kind_t kind, bool is_static, int numa_node, size_t blocks, size_t* arena_idx, mi_bitmap_index_t* bitmap_idx, mi_os_tld_t* tld) 
+static inline bool mi_arena_kind_try_alloc(mi_arena_kind_t kind, bool is_static, int numa_node, size_t blocks, size_t* arena_idx, mi_bitmap_index_t* bitmap_idx, mi_os_tld_t* tld) 
 {
   if (!is_static&&blocks>MI_ARENA_MAX_OBJ_SIZE) return false; // too large for non-static arena
   size_t arenas_count;
@@ -204,7 +205,6 @@ static bool mi_arena_kind_try_alloc(mi_arena_kind_t kind, bool is_static, int nu
 /* -----------------------------------------------------------
   Add fresh arena from the OS
 ----------------------------------------------------------- */
-
 
 static bool mi_arena_add(mi_arena_kind_t kind, bool is_static, void* start, size_t blocks, int numa_node, 
                          size_t claim_blocks, mi_bitmap_t bitmap_map, mi_bitmap_t bitmap_com, size_t* arena_idx, mi_bitmap_index_t* bitmap_idx) 
@@ -268,16 +268,16 @@ static bool mi_arena_try_alloc_from_os(size_t blocks, bool commit, bool allow_la
   Allocation from an arena
 ----------------------------------------------------------- */
 
-static bool mi_arena_try_allocx(size_t blocks, bool commit, bool large, size_t* arena_idx, mi_bitmap_index_t* bitmap_idx, mi_os_tld_t* tld)
+static bool mi_arena_try_allocx(size_t blocks, bool commit, bool allow_fixed, size_t* arena_idx, mi_bitmap_index_t* bitmap_idx, mi_os_tld_t* tld)
 {
   int numa_node = (_mi_os_numa_node_count()<=1 ? -1 : _mi_os_numa_node(tld));
 
   // try to find a slot in an existiting arena
-  if (commit&&large) {
-    if (mi_arena_kind_try_alloc(mi_arena_fixed, true, numa_node, blocks, arena_idx, bitmap_idx, tld)) return true;
-    if (mi_arena_kind_try_alloc(mi_arena_fixed, false, numa_node, blocks, arena_idx, bitmap_idx, tld)) return true;
-  }
   if (commit) {
+    if (allow_fixed) {
+      if (mi_arena_kind_try_alloc(mi_arena_fixed, true, numa_node, blocks, arena_idx, bitmap_idx, tld)) return true;
+      if (mi_arena_kind_try_alloc(mi_arena_fixed, false, numa_node, blocks, arena_idx, bitmap_idx, tld)) return true;
+    }
     if (mi_arena_kind_try_alloc(mi_arena_committed, true, numa_node, blocks, arena_idx, bitmap_idx, tld)) return true;
     if (mi_arena_kind_try_alloc(mi_arena_committed, false, numa_node, blocks, arena_idx, bitmap_idx, tld)) return true;
   }
@@ -286,17 +286,17 @@ static bool mi_arena_try_allocx(size_t blocks, bool commit, bool large, size_t* 
 
   // failed to allocate, try to allocate on a different numa node for static arenas
   if (numa_node>=0) {
-    if (commit&&large) {
-      if (mi_arena_kind_try_alloc(mi_arena_fixed, true, -1, blocks, arena_idx, bitmap_idx, tld)) return true;
-    }
     if (commit) {
+      if (allow_fixed) {
+        if (mi_arena_kind_try_alloc(mi_arena_fixed, true, -1, blocks, arena_idx, bitmap_idx, tld)) return true;
+      }
       if (mi_arena_kind_try_alloc(mi_arena_committed, true, -1, blocks, arena_idx, bitmap_idx, tld)) return true;
     }
     if (mi_arena_kind_try_alloc(mi_arena_reserved, true, -1, blocks, arena_idx, bitmap_idx, tld)) return true;
   }
 
   // failed to allocate, try a fresh OS allocated arena 
-  if (mi_arena_try_alloc_from_os(blocks,commit,large,arena_idx,bitmap_idx,tld)) return true;
+  if (mi_arena_try_alloc_from_os(blocks,commit,allow_fixed,arena_idx,bitmap_idx,tld)) return true;
 
   // ah, completely failed
   return false;
@@ -306,8 +306,6 @@ static bool mi_arena_try_allocx(size_t blocks, bool commit, bool large, size_t* 
 /* -----------------------------------------------------------
   Arena Allocation
 ----------------------------------------------------------- */
-bool    _mi_os_commit(void* p, size_t size, bool* is_zero, mi_stats_t* stats);
-
 static void* mi_arena_try_alloc(size_t blocks, bool* commit, bool* large, bool* is_zero, size_t* memid, mi_os_tld_t* tld) 
 {
   if (blocks>MI_BITMAP_FIELD_BITS) return false; // TODO: for now, we cannot allocate blocks larger than this..
@@ -318,7 +316,7 @@ static void* mi_arena_try_alloc(size_t blocks, bool* commit, bool* large, bool* 
   size_t arena_idx;
   if (!mi_arena_try_allocx(blocks, *commit, *large, &arena_idx, &bitmap_idx, tld)) return NULL;
 
-  // claimed it! 
+  // success!
   mi_arena_t* arena = &mi_arenas[arena_idx];
   mi_assert_internal(arena->start!=NULL&&mi_atomic_read_relaxed(&arena->field_count)>0&&arena->block_count>=blocks);
   mi_assert_internal(mi_bitmap_is_claimed(mi_arena_bitmap_map(arena), mi_atomic_read_relaxed(&arena->field_count), blocks, bitmap_idx));
