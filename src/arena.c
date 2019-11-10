@@ -231,7 +231,7 @@ static bool mi_arena_add(mi_arena_kind_t kind, bool is_static, void* start, size
   else if (claim_blocks>0) {
     mi_assert_internal(claim_blocks<=blocks&&bitmap_map==NULL&&bitmap_idx != NULL);
     *bitmap_idx = 0;
-    mi_bitmap_claim(&arena->blocks_map.field, 1, claim_blocks, *bitmap_idx);
+    mi_bitmap_claim(&arena->blocks_map.field, 1, claim_blocks, *bitmap_idx, NULL);
   }
   arena->is_committed = (kind<=mi_arena_committed);
   arena->is_fixed = (kind<=mi_arena_fixed);
@@ -323,15 +323,19 @@ static void* mi_arena_try_alloc(size_t blocks, bool* commit, bool* large, bool* 
   
   void* p = (uint8_t*)arena->start + (mi_bitmap_index_bit(bitmap_idx)*MI_ARENA_BLOCK_SIZE);
   *large = arena->is_fixed;
-  *is_zero = mi_bitmap_claim(mi_arena_bitmap_com(arena), mi_atomic_read_relaxed(&arena->field_count), blocks, bitmap_idx);
+  *memid = mi_memid_create(arena_idx, bitmap_idx);
+
+  bool any_zero = false;
+  *is_zero = mi_bitmap_claim(mi_arena_bitmap_com(arena), mi_atomic_read_relaxed(&arena->field_count), blocks, bitmap_idx, &any_zero);
+  if (!mi_option_is_enabled(mi_option_eager_commit)) { any_zero = true; } // if no eager commit, even dirty segments can be partially committed
   if (arena->is_committed) {
     *commit = true;
   }
-  else if (*commit && *is_zero) {
-    _mi_os_commit(p, blocks*MI_ARENA_BLOCK_SIZE, NULL, tld->stats);
-    *commit = true;
+  else if (*commit && any_zero) {
+    bool commit_zero;
+    _mi_os_commit(p, blocks*MI_ARENA_BLOCK_SIZE, &commit_zero, tld->stats);
   }
-  *memid = mi_memid_create(arena_idx, bitmap_idx);
+
   return p;  
 }
 
@@ -356,7 +360,10 @@ void* _mi_arena_alloc_aligned(size_t size, size_t alignment,
 
   // otherwise, fall back to the OS
   *is_zero = true;
-  *memid = MI_MEMID_OS;
+  *memid   = MI_MEMID_OS;
+  if (*large) {
+    *large = mi_option_is_enabled(mi_option_large_os_pages); // try large OS pages only if enabled and allowed
+  }
   return _mi_os_alloc_aligned(size, alignment, *commit, large, tld);
 }
 
@@ -437,8 +444,8 @@ int mi_reserve_huge_os_pages_at(size_t pages, int numa_node, size_t timeout_msec
   if (post>0) {
     // don't use leftover bits at the end
     mi_bitmap_index_t postidx = mi_bitmap_index_create(fields-1, MI_BITMAP_FIELD_BITS-post);
-    mi_bitmap_claim(bm_map, fields, post, postidx);
-    mi_bitmap_claim(bm_com, fields, post, postidx);
+    mi_bitmap_claim(bm_map, fields, post, postidx, NULL);
+    mi_bitmap_claim(bm_com, fields, post, postidx, NULL);
   }
   if (!mi_arena_add(mi_arena_fixed, true, p, bcount, numa_node, 0, bm_map, bm_com, NULL, NULL)) {
     // out of arenas!
@@ -485,4 +492,29 @@ int mi_reserve_huge_os_pages(size_t pages, double max_secs, size_t* pages_reserv
   int err = mi_reserve_huge_os_pages_interleave(pages, (size_t)(max_secs * 1000.0));  
   if (err==0 && pages_reserved!=NULL) *pages_reserved = pages;
   return err;
+}
+
+
+static bool mi_arena_contains(mi_arena_kind_t kind, bool is_static, const void* p) {
+  size_t arena_count;
+  mi_arena_t* arena = mi_arena_get(kind, is_static, &arena_count);
+  for (; arena_count>0; arena++, arena_count--) {
+    void* start = arena->start;
+    void* end = (uint8_t*)start + (arena->block_count*MI_ARENA_BLOCK_SIZE);
+    if (p >= start && p <= end) return true;
+  }
+  return false;
+}
+
+bool mi_is_in_heap_region(const void* p) mi_attr_noexcept {
+  for (int kind = 0; kind < MI_ARENA_KINDS; kind++) {
+    if (mi_arena_contains((mi_arena_kind_t)kind, true, p)) return true;
+    if (mi_arena_contains((mi_arena_kind_t)kind, false, p)) return true;
+  }
+  return false;
+}
+
+void _mi_arena_collect(mi_stats_t* stats) {
+  // TODO
+  return;
 }
