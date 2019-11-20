@@ -300,7 +300,10 @@ static void* mi_unix_mmap(void* addr, size_t size, size_t try_alignment, int pro
   #if !defined(MAP_ANONYMOUS)
   #define MAP_ANONYMOUS  MAP_ANON
   #endif
-  int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+  #if !defined(MAP_NORESERVE)
+  #define MAP_NORESERVE  0
+  #endif
+  int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
   int fd = -1;
   #if defined(MAP_ALIGNED)  // BSD
   if (try_alignment > 0) {
@@ -626,26 +629,40 @@ static bool mi_os_commitx(void* addr, size_t size, bool commit, bool conservativ
   }
   #elif defined(__wasi__)
   // WebAssembly guests can't control memory protection
+  #elif defined(MAP_FIXED)
+  if (!commit) {
+    // use mmap with MAP_FIXED to discard the existing memory (and reduce commit charge)
+    void* p = mmap(start, size, PROT_NONE, (MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE), -1, 0);
+    if (p != start) { err = errno; }
+  }
+  else {
+    // for commit, just change the protection
+    err = mprotect(start, csize, (PROT_READ | PROT_WRITE));
+    if (err != 0) { err = errno; }
+  }
   #else
   err = mprotect(start, csize, (commit ? (PROT_READ | PROT_WRITE) : PROT_NONE));
   if (err != 0) { err = errno; }
   #endif
   if (err != 0) {
-    _mi_warning_message("commit/decommit error: start: 0x%p, csize: 0x%x, err: %i\n", start, csize, err);
+    _mi_warning_message("%s error: start: 0x%p, csize: 0x%x, err: %i\n", commit ? "commit" : "decommit", start, csize, err);
   }
   mi_assert_internal(err == 0);
   return (err == 0);
 }
 
 bool _mi_os_commit(void* addr, size_t size, bool* is_zero, mi_stats_t* stats) {
-  return mi_os_commitx(addr, size, true, false /* conservative? */, is_zero, stats);
+  return mi_os_commitx(addr, size, true, false /* liberal */, is_zero, stats);
 }
 
 bool _mi_os_decommit(void* addr, size_t size, mi_stats_t* stats) {
   bool is_zero;
-  return mi_os_commitx(addr, size, false, true /* conservative? */, &is_zero, stats);
+  return mi_os_commitx(addr, size, false, true /* conservative */, &is_zero, stats);
 }
 
+bool _mi_os_commit_unreset(void* addr, size_t size, bool* is_zero, mi_stats_t* stats) {
+  return mi_os_commitx(addr, size, true, true /* conservative */, is_zero, stats);
+}
 
 // Signal to the OS that the address range is no longer in use
 // but may be used later again. This will release physical memory
@@ -704,12 +721,22 @@ static bool mi_os_resetx(void* addr, size_t size, bool reset, mi_stats_t* stats)
 // pages and reduce swapping while keeping the memory committed.
 // We page align to a conservative area inside the range to reset.
 bool _mi_os_reset(void* addr, size_t size, mi_stats_t* stats) {
-  return mi_os_resetx(addr, size, true, stats);
+  if (mi_option_is_enabled(mi_option_reset_decommits)) {
+    return _mi_os_decommit(addr, size, stats);
+  }
+  else {
+    return mi_os_resetx(addr, size, true, stats);
+  }
 }
 
 bool _mi_os_unreset(void* addr, size_t size, bool* is_zero, mi_stats_t* stats) {
-  *is_zero = false;
-  return mi_os_resetx(addr, size, false, stats);
+  if (mi_option_is_enabled(mi_option_reset_decommits)) {
+    return _mi_os_commit_unreset(addr, size, is_zero, stats);  // re-commit it (conservatively!)
+  }
+  else {
+    *is_zero = false;
+    return mi_os_resetx(addr, size, false, stats);
+  }
 }
 
 
