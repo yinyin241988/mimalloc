@@ -41,7 +41,7 @@ static bool mi_heap_visit_pages(mi_heap_t* heap, heap_page_visitor_fun* fn, void
     }
   }
   mi_assert_internal(count == total);
-  return true
+  return true;
 }
 
 
